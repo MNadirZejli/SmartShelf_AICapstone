@@ -6,7 +6,7 @@
 
 ## What changed in v2
 
-| v1 (rejected) | v2 (this version) |
+| v1  | v2  |
 |---|---|
 | Single model (LightGBM Tweedie) | **3 models**: LightGBM (MAE) + XGBoost + Prophet |
 | Single train/test split | **Walk-forward cross-validation** (3 folds, expanding window) |
@@ -85,30 +85,12 @@ smartshelf/
 └── requirements.txt
 ```
 
----
-
-## Setup
-
-```bash
-git clone https://github.com/MNadirZejli/smartshelf_capstone.git
-cd smartshelf_capstone
-python -m venv venv
-venv\Scripts\activate        # Windows
-pip install -r requirements.txt
-```
-
-Place M5 CSV files in `data/raw/`:
-- `sales_train_evaluation.csv`
-- `calendar.csv`
-- `sell_prices.csv`
-
----
 
 ## Run
 
 ```bash
-python run_pipeline.py    # ~10 minutes, runs all 4 steps
-streamlit run app/app.py  # Opens at http://localhost:8501
+python run_pipeline.py    
+streamlit run app/app.py 
 ```
 
 ---
