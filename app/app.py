@@ -1,6 +1,6 @@
 """
 app.py — SmartShelf v2
-5 pages: Daily Replenishment | Order Assistant | Model Comparison | Cost Dashboard | Model Insights
+6 pages: Daily Replenishment | Order Assistant | Upcoming Events | Model Comparison | Cost Dashboard | Model Insights
 """
 
 import streamlit as st
@@ -31,6 +31,7 @@ st.markdown("""
 
 PROCESSED = Path("data/processed")
 MODELS    = Path("outputs/models")
+RAW       = Path("data/raw")
 
 MODEL_NAMES = {
     "lgbm":            "LightGBM",
@@ -108,6 +109,34 @@ def build_replenishment_table(store: str) -> pd.DataFrame:
     table = table.sort_values("Days of cover").reset_index(drop=True)
     return table
 
+@st.cache_data
+def build_upcoming_events(n_events: int = 15):
+    """Calendar events that fall AFTER the dataset's last date.
+    'Today' = last date in sales_features (demo runs on the M5 period).
+    Returns (events_df, reference_date). Cached for speed."""
+    feats     = load_features()
+    today_ref = pd.to_datetime(feats["date"]).max()
+
+    cal = pd.read_csv(RAW / "calendar.csv",
+                      usecols=["date", "event_name_1", "event_type_1"])
+    cal["date"] = pd.to_datetime(cal["date"])
+
+    upcoming = cal[cal["event_name_1"].notna() & (cal["date"] > today_ref)].copy()
+    upcoming = upcoming.sort_values("date").head(n_events).reset_index(drop=True)
+    upcoming["days_until"] = (upcoming["date"] - today_ref).dt.days
+
+    # Simple, defensible prep advice — high-impact holidays get a longer lead time.
+    HIGH_IMPACT = {
+        "Christmas", "Thanksgiving", "SuperBowl", "Easter", "NewYear",
+        "Halloween", "ValentinesDay", "Mother's day", "Father's day",
+        "IndependenceDay", "LaborDay", "MemorialDay",
+    }
+    upcoming["prep_tip"] = upcoming["event_name_1"].apply(
+        lambda n: "Order ~3–5 days ahead (high-impact)"
+        if n in HIGH_IMPACT else "Order ~1–2 days ahead"
+    )
+    return upcoming, today_ref
+
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 st.sidebar.title("📦 SmartShelf")
 st.sidebar.caption("AI-powered replenishment assistant")
@@ -115,6 +144,7 @@ st.sidebar.divider()
 page = st.sidebar.radio("Navigation", [
     "🌅 Daily Replenishment",
     "🛒 Order Assistant",
+    "📅 Upcoming Events",
     "📊 Model Comparison",
     "💶 Cost Dashboard",
     "🔬 Model Insights",
@@ -317,7 +347,52 @@ elif page == "🛒 Order Assistant":
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PAGE 3 — MODEL COMPARISON (the new page that shows we're serious)
+# PAGE 3 — UPCOMING EVENTS (calendar radar for the store manager)
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "📅 Upcoming Events":
+    st.title("📅 Upcoming Events")
+    st.caption("Calendar events to anticipate for ordering — powered by the M5 calendar features.")
+
+    try:
+        events, today_ref = build_upcoming_events(n_events=15)
+
+        st.info(
+            f"ℹ️ **Demo note**: this runs on the M5 dataset period, so 'today' is the "
+            f"dataset's last date (**{today_ref.date()}**). In production this would be "
+            f"the current date. The M5 calendar only extends ~28 days past the data, so "
+            f"you may see fewer than 15 events.",
+            icon="ℹ️",
+        )
+
+        if events.empty:
+            st.warning("No upcoming events found after the dataset's last date.")
+        else:
+            TYPE_STYLE = {
+                "Sporting":  ("🏈", "#378ADD"),
+                "Cultural":  ("🎭", "#EF9F27"),
+                "National":  ("🎆", "#1D9E75"),
+                "Religious": ("🕊️", "#9C6ADE"),
+            }
+            for _, ev in events.iterrows():
+                icon, color = TYPE_STYLE.get(ev["event_type_1"], ("📌", "#888780"))
+                st.markdown(f"""<div style="border-left:4px solid {color};
+                    background:#fafafa; padding:0.6rem 1rem; border-radius:6px;
+                    margin-bottom:0.5rem;">
+                    <span style="font-size:1.05rem;">{icon} <b>{ev['event_name_1']}</b></span>
+                    <span style="float:right; color:#888;">{ev['date'].date()} · in {ev['days_until']} days</span><br>
+                    <span style="color:{color}; font-weight:600;">{ev['event_type_1']}</span>
+                    <span style="color:#555;"> — {ev['prep_tip']}</span>
+                    </div>""", unsafe_allow_html=True)
+
+    except FileNotFoundError:
+        st.error("Run `python run_pipeline.py` first (calendar.csv must be in data/raw/).")
+    except Exception as e:
+        st.error(f"Error: {e}")
+        import traceback; st.code(traceback.format_exc())
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE 4 — MODEL COMPARISON (the new page that shows we're serious)
 # ══════════════════════════════════════════════════════════════════════════════
 elif page == "📊 Model Comparison":
     st.title("📊 Model Comparison")
@@ -397,7 +472,7 @@ elif page == "📊 Model Comparison":
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PAGE 4 — COST DASHBOARD
+# PAGE 5 — COST DASHBOARD
 # ══════════════════════════════════════════════════════════════════════════════
 elif page == "💶 Cost Dashboard":
     st.title("💶 Cost Dashboard")
@@ -485,7 +560,7 @@ elif page == "💶 Cost Dashboard":
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PAGE 5 — MODEL INSIGHTS
+# PAGE 6 — MODEL INSIGHTS
 # ══════════════════════════════════════════════════════════════════════════════
 elif page == "🔬 Model Insights":
     st.title("🔬 Model Insights")
