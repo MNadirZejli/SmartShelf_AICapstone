@@ -47,6 +47,63 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     df["is_month_end"] = df["date"].dt.is_month_end.astype(np.int8)
     df["has_event"]    = df["event_name_1"].notna().astype(np.int8)
 
+    # ── Event proximity features (computed once per date, then remapped) ──
+    # Events are identical across all products on a given date, so we compute
+    # on unique calendar dates (~1969 rows) and merge back — fast, no per-id loop.
+    cal = (
+        df[["date", "event_name_1", "event_type_1"]]
+        .drop_duplicates("date")
+        .sort_values("date")
+        .reset_index(drop=True)
+    )
+    is_event = cal["event_name_1"].notna().to_numpy()
+    dates    = cal["date"].to_numpy()
+    n        = len(cal)
+    CAP      = 28
+
+    # days_since_last_event: forward pass (begin → end)
+    since = np.full(n, CAP, dtype=np.int16)
+    last_event = None
+    for i in range(n):
+        if last_event is not None:
+            gap = int((dates[i] - last_event) / np.timedelta64(1, "D"))
+            since[i] = min(gap, CAP)
+        if is_event[i]:
+            since[i] = 0
+            last_event = dates[i]
+
+    # days_to_next_event: backward pass (end → begin)
+    to_next = np.full(n, CAP, dtype=np.int16)
+    next_event = None
+    for i in range(n - 1, -1, -1):
+        if next_event is not None:
+            gap = int((next_event - dates[i]) / np.timedelta64(1, "D"))
+            to_next[i] = min(gap, CAP)
+        if is_event[i]:
+            to_next[i] = 0
+            next_event = dates[i]
+
+    # event_type_code: fixed integer mapping (0 = no event)
+    TYPE_CODE = {"Sporting": 1, "Cultural": 2, "National": 3, "Religious": 4}
+    cal["days_since_last_event"] = since
+    cal["days_to_next_event"]    = to_next
+    cal["event_type_code"]       = (
+        cal["event_type_1"].map(TYPE_CODE).fillna(0).astype(np.int16)
+    )
+
+    # Remap onto every row via a date → value merge
+    df = df.merge(
+        cal[["date", "days_since_last_event", "days_to_next_event", "event_type_code"]],
+        on="date", how="left",
+    )
+    # Safety: the merge resets row order — restore id+date order for the
+    # downstream groupby/rolling/streak features, with a clean index.
+    df = df.sort_values(["id", "date"]).reset_index(drop=True)
+
+    # Safety: no NaN allowed in the new calendar columns
+    new_cols = ["days_since_last_event", "days_to_next_event", "event_type_code"]
+    assert df[new_cols].isna().sum().sum() == 0, "NaN found in new calendar features"
+
     # ── SNAP flag ─────────────────────────────────────────────────────────
     snap_map = {"CA": "snap_CA", "TX": "snap_TX", "WI": "snap_WI"}
     df["snap_day"] = 0
@@ -90,6 +147,7 @@ def get_feature_columns() -> list:
         "day_of_week", "day_of_month", "week_of_year",
         "month", "quarter", "is_weekend", "is_month_end",
         "has_event", "snap_day",
+        "days_to_next_event", "days_since_last_event", "event_type_code",
         "demand_7d", "demand_28d", "sales_velocity", "zero_streak",
         "item_id", "store_id", "cat_id", "dept_id", "state_id",
     ]

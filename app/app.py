@@ -1,6 +1,6 @@
 """
 app.py — SmartShelf v2
-4 pages: Order Assistant | Model Comparison | Cost Dashboard | Model Insights
+5 pages: Daily Replenishment | Order Assistant | Model Comparison | Cost Dashboard | Model Insights
 """
 
 import streamlit as st
@@ -69,11 +69,51 @@ def load_metrics():
     with open(MODELS / "metrics.json") as f:
         return json.load(f)
 
+@st.cache_data
+def build_replenishment_table(store: str) -> pd.DataFrame:
+    """For one store, loop over all its products and build the daily
+    replenishment table. Reuses predict.py logic. Cached per store."""
+    df = load_features()
+    df["date"] = pd.to_datetime(df["date"])
+    store_df = df[df["store_id"] == store]
+    items = sorted(store_df["item_id"].unique())
+
+    rng  = np.random.default_rng(42)   # fixed seed → reproducible simulated stock
+    rows = []
+    for item in items:
+        item_df = store_df[store_df["item_id"] == item].copy()
+        if item_df.empty:
+            continue
+        forecast_df  = forecast_item(item_df, horizon=7)
+        daily_avg    = float(forecast_df["forecast"].mean())
+        days_of_stock = int(rng.integers(1, 11))          # random 1..10 days
+        current_stock = int(round(daily_avg * days_of_stock))
+        order = compute_order_quantity(forecast_df, current_stock=current_stock)
+        risk  = detect_stockout_risk(item_df, forecast_df, current_stock)
+        rows.append({
+            "Product":          item,
+            "Category":         item_df["cat_id"].iloc[0],
+            "Current stock":    current_stock,
+            "Days of cover":    risk["days_cover"],
+            "7-day forecast":   order["expected_7d_demand"],
+            "Recommended order": order["order_quantity"],
+            "_risk_level":      risk["risk_level"],
+        })
+
+    table = pd.DataFrame(rows)
+    if table.empty:
+        return table
+    risk_map = {"critical": "Critical", "high": "High", "normal": "OK"}
+    table["Risk"] = table["_risk_level"].map(risk_map)
+    table = table.sort_values("Days of cover").reset_index(drop=True)
+    return table
+
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 st.sidebar.title("📦 SmartShelf")
 st.sidebar.caption("AI-powered replenishment assistant")
 st.sidebar.divider()
 page = st.sidebar.radio("Navigation", [
+    "🌅 Daily Replenishment",
     "🛒 Order Assistant",
     "📊 Model Comparison",
     "💶 Cost Dashboard",
@@ -86,9 +126,82 @@ stockout_rate = st.sidebar.slider("Stockout cost (% of price)", 10, 150, 75, 5, 
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PAGE 1 — ORDER ASSISTANT
+# PAGE 1 — DAILY REPLENISHMENT (store manager's morning view)
 # ══════════════════════════════════════════════════════════════════════════════
-if page == "🛒 Order Assistant":
+if page == "🌅 Daily Replenishment":
+    st.title("🌅 Daily Replenishment")
+    st.caption("Store manager's view: all products to order today, sorted by urgency.")
+
+    try:
+        df = load_features()
+        store = st.selectbox("Store", sorted(df["store_id"].unique()))
+
+        st.info(
+            "ℹ️ **Simulated stock**: with no real POS data available, the current stock "
+            "is estimated (average demand × a random number of days, fixed seed for "
+            "reproducibility). In production it would come from the POS system.",
+            icon="ℹ️",
+        )
+
+        with st.spinner(f"Computing recommendations for {store} ..."):
+            table = build_replenishment_table(store)
+
+        if table.empty:
+            st.warning("No products found for this store.")
+        else:
+            to_order = table[table["Recommended order"] > 0].reset_index(drop=True)
+
+            # ── KPIs ───────────────────────────────────────────────────────
+            k1, k2, k3 = st.columns(3)
+            k1.metric("Products to order", len(to_order))
+            k2.metric("Total units to order", int(to_order["Recommended order"].sum()))
+            k3.metric("Critical risk", int((to_order["Risk"] == "Critical").sum()))
+
+            st.divider()
+
+            if to_order.empty:
+                st.success("✓ No products to order today for this store.")
+            else:
+                st.subheader(f"Products to order — {store}")
+
+                def color_risk(val):
+                    styles = {
+                        "Critical": "background-color:#fff0f0;color:#E24B4A;font-weight:600",
+                        "High":     "background-color:#fffbf0;color:#EF9F27;font-weight:600",
+                        "OK":       "background-color:#f0fff8;color:#1D9E75;font-weight:600",
+                    }
+                    return styles.get(val, "")
+
+                display_df = to_order.drop(columns=["_risk_level"])
+                styler = display_df.style
+                # recent pandas: Styler.map ; older: Styler.applymap (fallback)
+                if hasattr(styler, "map"):
+                    styled = styler.map(color_risk, subset=["Risk"])
+                else:
+                    styled = styler.applymap(color_risk, subset=["Risk"])
+                st.dataframe(styled, use_container_width=True, hide_index=True)
+
+                # ── CSV order sheet ────────────────────────────────────────
+                csv = (to_order[["Product", "Recommended order"]]
+                       .to_csv(index=False).encode("utf-8"))
+                st.download_button(
+                    "⬇️ Download order sheet (CSV)",
+                    data=csv,
+                    file_name=f"order_sheet_{store}.csv",
+                    mime="text/csv",
+                )
+
+    except FileNotFoundError:
+        st.error("Run `python run_pipeline.py` first.")
+    except Exception as e:
+        st.error(f"Error: {e}")
+        import traceback; st.code(traceback.format_exc())
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE 2 — ORDER ASSISTANT
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "🛒 Order Assistant":
     st.title("🛒 Order Assistant")
     st.caption("Real-time replenishment recommendation powered by LightGBM.")
 
@@ -204,7 +317,7 @@ if page == "🛒 Order Assistant":
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PAGE 2 — MODEL COMPARISON (the new page that shows we're serious)
+# PAGE 3 — MODEL COMPARISON (the new page that shows we're serious)
 # ══════════════════════════════════════════════════════════════════════════════
 elif page == "📊 Model Comparison":
     st.title("📊 Model Comparison")
@@ -284,7 +397,7 @@ elif page == "📊 Model Comparison":
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PAGE 3 — COST DASHBOARD
+# PAGE 4 — COST DASHBOARD
 # ══════════════════════════════════════════════════════════════════════════════
 elif page == "💶 Cost Dashboard":
     st.title("💶 Cost Dashboard")
@@ -372,7 +485,7 @@ elif page == "💶 Cost Dashboard":
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PAGE 4 — MODEL INSIGHTS
+# PAGE 5 — MODEL INSIGHTS
 # ══════════════════════════════════════════════════════════════════════════════
 elif page == "🔬 Model Insights":
     st.title("🔬 Model Insights")
