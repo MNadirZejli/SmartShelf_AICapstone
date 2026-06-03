@@ -36,6 +36,9 @@ FEATURE_LABELS = {
     "is_weekend":       "weekend effect",
     "is_month_end":     "month-end effect",
     "has_event":        "special event nearby",
+    "days_to_next_event":    "days to next event",
+    "days_since_last_event": "days since last event",
+    "event_type_code":       "event type",
     "snap_day":         "SNAP benefit day",
     "demand_7d":        "total demand last 7 days",
     "demand_28d":       "total demand last 28 days",
@@ -67,10 +70,11 @@ def explain_prediction(X_row: pd.DataFrame, top_n: int = 4) -> list:
     bullets = []
     for _, row in df.head(top_n).iterrows():
         label     = FEATURE_LABELS.get(row["feature"], row["feature"])
-        direction = "increases" if row["shap"] > 0 else "decreases"
-        magnitude = "strongly" if abs(row["shap"]) > 2 else "moderately" if abs(row["shap"]) > 0.5 else "slightly"
-        sign      = "+" if row["shap"] > 0 else ""
-        bullets.append(f"{label.capitalize()} {magnitude} {direction} demand ({sign}{row['shap']:.2f} units)")
+        direction = "up" if row["shap"] > 0 else "down"
+        bullets.append(
+            f"{label.capitalize()} pushed the forecast {direction} "
+            f"by {abs(row['shap']):.2f} units"
+        )
 
     return bullets
 

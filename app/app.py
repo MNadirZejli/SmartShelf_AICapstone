@@ -48,6 +48,10 @@ MODEL_COLORS = {
     "rolling_mean_28": "#E24B4A",
 }
 
+def fmt4(x):
+    """Display helper — 4-decimal formatting for MAE/RMSE (cosmetic only)."""
+    return f"{x:.4f}" if isinstance(x, (int, float)) else x
+
 # ── Cached loaders ─────────────────────────────────────────────────────────────
 @st.cache_data
 def load_features():
@@ -536,8 +540,8 @@ elif page == "📊 Model Comparison":
                 name  = MODEL_NAMES.get(model, model)
                 color = MODEL_COLORS.get(model, "#888")
                 st.markdown(f"**{name}**")
-                st.metric("MAE",  m["mae"])
-                st.metric("RMSE", m["rmse"])
+                st.metric("MAE",  fmt4(m["mae"]))
+                st.metric("RMSE", fmt4(m["rmse"]))
 
         st.divider()
 
@@ -618,14 +622,17 @@ elif page == "💶 Cost Dashboard":
                     "type":       "ML Model" if model in ["lgbm","xgb","prophet"] else "Baseline",
                 })
         cost_df = pd.DataFrame(cost_rows).sort_values("Total cost")
+        # Compact, non-truncated labels (e.g. "€102.8k"), consistent across bars
+        cost_df["label"] = cost_df["Total cost"].apply(lambda v: f"€{v/1000:.1f}k")
 
         fig_cost = px.bar(cost_df, x="Total cost", y="Model", orientation="h",
             color="type",
             color_discrete_map={"ML Model":"#1D9E75","Baseline":"#E24B4A"},
-            text="Total cost")
-        fig_cost.update_traces(texttemplate="€%{text:,.0f}", textposition="outside")
-        fig_cost.update_layout(height=320, margin=dict(l=0,r=0,t=10,b=0),
+            text="label")
+        fig_cost.update_traces(texttemplate="%{text}", textposition="outside", cliponaxis=False)
+        fig_cost.update_layout(height=320, margin=dict(l=0,r=80,t=10,b=0),
             yaxis=dict(autorange="reversed"), legend=dict(orientation="h", y=1.12))
+        fig_cost.update_xaxes(range=[0, cost_df["Total cost"].max() * 1.18])
         st.plotly_chart(fig_cost, use_container_width=True)
 
         cl, cr = st.columns(2)
@@ -681,10 +688,10 @@ elif page == "🔬 Model Insights":
 
         st.subheader("Holdout performance summary")
         ca, cb, cc, cd = st.columns(4)
-        ca.metric("LightGBM MAE",  holdout.get("lgbm",{}).get("mae","—"))
-        cb.metric("XGBoost MAE",   holdout.get("xgb",{}).get("mae","—"))
-        cc.metric("Prophet MAE",   holdout.get("prophet",{}).get("mae","—"))
-        cd.metric("Seasonal naive MAE", holdout.get("seasonal_naive",{}).get("mae","—"))
+        ca.metric("LightGBM MAE",  fmt4(holdout.get("lgbm",{}).get("mae","—")))
+        cb.metric("XGBoost MAE",   fmt4(holdout.get("xgb",{}).get("mae","—")))
+        cc.metric("Prophet MAE",   fmt4(holdout.get("prophet",{}).get("mae","—")))
+        cd.metric("Seasonal naive MAE", fmt4(holdout.get("seasonal_naive",{}).get("mae","—")))
 
         st.divider()
         st.subheader("Feature importance — LightGBM")
