@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.data.features import get_feature_columns
-from src.models.predict import forecast_item, compute_order_quantity, detect_stockout_risk
+from src.models.predict import forecast_item, compute_order_quantity, detect_stockout_risk, get_model, encode_row
 from src.cost.simulator import compute_costs, summary_by_store, summary_by_category, summary_by_model
 
 st.set_page_config(page_title="SmartShelf", page_icon="📦", layout="wide")
@@ -136,6 +136,94 @@ def build_upcoming_events(n_events: int = 15):
         if n in HIGH_IMPACT else "Order ~1–2 days ahead"
     )
     return upcoming, today_ref
+
+# Event-type → integer code. MUST match TYPE_CODE in src/data/features.py.
+EVENT_TYPE_CODE = {"Sporting": 1, "Cultural": 2, "National": 3, "Religious": 4}
+
+@st.cache_data
+def build_event_impact(store: str):
+    """Counterfactual event impact for one store, via the trained LightGBM model.
+    For each product's most recent state, predict the 3 days around the event with
+    event signals ON vs the SAME days with events OFF. Cached per store."""
+    model     = get_model()
+    feat_cols = get_feature_columns()
+
+    feats = load_features()
+    feats["date"] = pd.to_datetime(feats["date"])
+    store_df = feats[feats["store_id"] == store]
+
+    events, today_ref = build_upcoming_events(n_events=15)
+    if store_df.empty or events.empty:
+        return [], today_ref
+
+    # One snapshot row per product = its latest known state (lags, rolling, price).
+    snap = (store_df.sort_values("date")
+                    .groupby("item_id", as_index=False)
+                    .tail(1)
+                    .reset_index(drop=True))
+    n        = len(snap)
+    MIN_BASE = 0.5   # ignore near-zero baselines (unstable %)
+    results  = []
+
+    for _, ev in events.iterrows():
+        E     = pd.Timestamp(ev["date"])
+        tcode = EVENT_TYPE_CODE.get(ev["event_type_1"], 0)
+        window = [E - pd.Timedelta(days=k) for k in (2, 1, 0)]
+
+        def scenario(event_on: bool) -> pd.DataFrame:
+            frames = []
+            for dk in window:
+                r = snap.copy()
+                r["date"]         = dk
+                r["day_of_week"]  = dk.dayofweek
+                r["day_of_month"] = dk.day
+                r["week_of_year"] = int(dk.isocalendar().week)
+                r["month"]        = dk.month
+                r["quarter"]      = dk.quarter
+                r["is_weekend"]   = int(dk.dayofweek >= 5)
+                r["is_month_end"] = int(dk.is_month_end)
+                if event_on:
+                    r["days_to_next_event"]    = (E - dk).days
+                    r["days_since_last_event"] = 28
+                    r["has_event"]             = int(dk == E)
+                    r["event_type_code"]       = tcode if dk == E else 0
+                else:
+                    r["days_to_next_event"]    = 28
+                    r["days_since_last_event"] = 28
+                    r["has_event"]             = 0
+                    r["event_type_code"]       = 0
+                frames.append(r)
+            return pd.concat(frames, ignore_index=True)
+
+        X_ev   = encode_row(scenario(True))[feat_cols]
+        X_base = encode_row(scenario(False))[feat_cols]
+        p_ev   = np.clip(model.predict(X_ev),   0, None).reshape(3, n).mean(axis=0)
+        p_base = np.clip(model.predict(X_base), 0, None).reshape(3, n).mean(axis=0)
+
+        if p_base.sum() < MIN_BASE:
+            results.append({"event": ev, "available": False})
+            continue
+
+        global_impact = (p_ev.sum() - p_base.sum()) / p_base.sum() * 100
+        per = pd.DataFrame({
+            "Product":    snap["item_id"].values,
+            "Category":   snap["cat_id"].values,
+            "Normal/day": np.round(p_base, 2),
+            "Event/day":  np.round(p_ev, 2),
+        })
+        per = per[p_base >= MIN_BASE].copy()
+        per["Impact %"] = np.round(
+            (per["Event/day"] - per["Normal/day"]) / per["Normal/day"] * 100, 1)
+        top5 = per.sort_values("Impact %", ascending=False).head(5).reset_index(drop=True)
+
+        results.append({
+            "event":         ev,
+            "available":     True,
+            "global_impact": round(float(global_impact), 1),
+            "top5":          top5,
+        })
+
+    return results, today_ref
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 st.sidebar.title("📦 SmartShelf")
@@ -351,20 +439,30 @@ elif page == "🛒 Order Assistant":
 # ══════════════════════════════════════════════════════════════════════════════
 elif page == "📅 Upcoming Events":
     st.title("📅 Upcoming Events")
-    st.caption("Calendar events to anticipate for ordering — powered by the M5 calendar features.")
+    st.caption("Calendar events to anticipate for ordering — with the model's estimated demand impact.")
 
     try:
-        events, today_ref = build_upcoming_events(n_events=15)
+        store = st.selectbox("Store", sorted(load_features()["store_id"].unique()))
+
+        with st.spinner(f"Estimating event impact for {store} ..."):
+            results, today_ref = build_event_impact(store)
 
         st.info(
-            f"ℹ️ **Demo note**: this runs on the M5 dataset period, so 'today' is the "
-            f"dataset's last date (**{today_ref.date()}**). In production this would be "
-            f"the current date. The M5 calendar only extends ~28 days past the data, so "
-            f"you may see fewer than 15 events.",
+            f"ℹ️ **Demo note**: 'today' is the dataset's last date (**{today_ref.date()}**); "
+            f"in production it would be the current date.",
             icon="ℹ️",
         )
+        st.caption(
+            "**How impact is computed:** for each product we take its most recent demand state "
+            "(lags, rolling averages, price) and ask the trained LightGBM model to predict the "
+            "3 days around the event (E-2, E-1, E) **with** the event signals on, versus the "
+            "**same 3 days with no event**. Same weekdays and same history — only the event flags "
+            "change. The headline % is the volume-weighted demand difference; near-zero-demand "
+            "products are excluded so percentages stay meaningful."
+        )
+        st.divider()
 
-        if events.empty:
+        if not results:
             st.warning("No upcoming events found after the dataset's last date.")
         else:
             TYPE_STYLE = {
@@ -373,16 +471,27 @@ elif page == "📅 Upcoming Events":
                 "National":  ("🎆", "#1D9E75"),
                 "Religious": ("🕊️", "#9C6ADE"),
             }
-            for _, ev in events.iterrows():
+            for r in results:
+                ev = r["event"]
                 icon, color = TYPE_STYLE.get(ev["event_type_1"], ("📌", "#888780"))
                 st.markdown(f"""<div style="border-left:4px solid {color};
                     background:#fafafa; padding:0.6rem 1rem; border-radius:6px;
-                    margin-bottom:0.5rem;">
+                    margin-bottom:0.25rem;">
                     <span style="font-size:1.05rem;">{icon} <b>{ev['event_name_1']}</b></span>
                     <span style="float:right; color:#888;">{ev['date'].date()} · in {ev['days_until']} days</span><br>
                     <span style="color:{color}; font-weight:600;">{ev['event_type_1']}</span>
                     <span style="color:#555;"> — {ev['prep_tip']}</span>
                     </div>""", unsafe_allow_html=True)
+
+                if not r["available"]:
+                    st.caption("Impact not available (not enough demand around this date).")
+                else:
+                    gi   = r["global_impact"]
+                    sign = "+" if gi >= 0 else ""
+                    st.markdown(f"**Estimated impact: {sign}{gi}% expected demand**")
+                    with st.expander("Top 5 most affected products"):
+                        st.dataframe(r["top5"], use_container_width=True, hide_index=True)
+                st.markdown("")
 
     except FileNotFoundError:
         st.error("Run `python run_pipeline.py` first (calendar.csv must be in data/raw/).")
